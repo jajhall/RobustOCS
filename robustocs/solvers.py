@@ -121,7 +121,7 @@ def gurobi_standard_genetics(
     )
 
     # set up the two sum-to-half constraints
-    M = np.zeros((2, dimension), dtype=np.bool)
+    M = np.zeros((2, dimension), dtype=bool)
     # define the M so that column i is [1;0] if i is a sire and [0;1] otherwise
     M[0, sires] = 1
     M[1, dams] = 1
@@ -251,7 +251,7 @@ def gurobi_robust_genetics_conic(
     )
 
     # set up the two sum-to-half constraints
-    M = np.zeros((2, dimension), dtype=np.bool)
+    M = np.zeros((2, dimension), dtype=bool)
     # define the M so that column i is [1;0] if i is a sire and [0;1] otherwise
     M[0, sires] = 1
     M[1, dams] = 1
@@ -393,7 +393,7 @@ def gurobi_robust_genetics_sqp(
     )
 
     # set up the two sum-to-half constraints
-    M = np.zeros((2, dimension), dtype=np.bool)
+    M = np.zeros((2, dimension), dtype=bool)
     # define the M so that column i is [1;0] if i is a sire and [0;1] otherwise
     M[0, sires] = 1
     M[1, dams] = 1
@@ -559,6 +559,7 @@ def highs_standard_genetics(
     model.lp_.col_upper_ = highs_bound_like(dimension, upper_bound)
 
     # define the quadratic term in the objective
+    model.hessian_.format_ = highspy.HessianFormat.kSquare
     model.hessian_.dim_ = dimension
     model.hessian_.start_ = sigma.indptr
     model.hessian_.index_ = sigma.indices
@@ -729,6 +730,7 @@ def highs_robust_genetics_sqp(
     model.lp_.col_upper_ = highs_bound_like(dimension, upper_bound)
 
     # define the quadratic term in the objective
+    model.hessian_.format_ = highspy.HessianFormat.kSquare
     model.hessian_.dim_ = dimension
     model.hessian_.start_ = sigma.indptr
     model.hessian_.index_ = sigma.indices
