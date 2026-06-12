@@ -154,8 +154,8 @@ def load_sparse_symmetric_matrix(filename: str, dimension: int, nnz: int,
 
 
 def load_sexes(filename: str, dimension: int) -> tuple[
-    npt.NDArray[np.unsignedinteger],
-    npt.NDArray[np.unsignedinteger],
+    npt.NDArray[np.uint64],
+    npt.NDArray[np.uint64],
     npt.NDArray[np.str_]
 ]:
     """
@@ -181,8 +181,8 @@ def load_sexes(filename: str, dimension: int) -> tuple[
     """
 
     # preallocate output vectors
-    sires = np.zeros((dimension,), dtype=np.unsignedinteger)
-    dams = np.zeros((dimension,), dtype=np.unsignedinteger)
+    sires = np.zeros((dimension,), dtype=np.uint64)
+    dams = np.zeros((dimension,), dtype=np.uint64)
     names = np.zeros((dimension,), dtype=np.str_)
 
     # index trackers
@@ -255,8 +255,8 @@ def load_problem(
     npt.NDArray[np.float64],
     npt.NDArray[np.float64] | sparse.spmatrix | None,
     int,
-    npt.NDArray[np.unsignedinteger] | None,
-    npt.NDArray[np.unsignedinteger] | None,
+    npt.NDArray[np.uint64] | None,
+    npt.NDArray[np.uint64] | None,
     npt.NDArray[np.str_] | None
 ]:
     """
