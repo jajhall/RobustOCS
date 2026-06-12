@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "robustocs"
 version = "0.2.2"
 dependencies = [
-    "numpy >= 1.21",
+    "numpy >= 1.26.4",
     "scipy >= 1.8.0",
     # NLP added in 11.0.0, NumPy 2.x support in this version
     "gurobipy >= 11.0.3",
