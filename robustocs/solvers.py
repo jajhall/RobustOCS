@@ -470,6 +470,508 @@ def highs_bound_like(dimension: int,
     return [value]*dimension if type(value) is float else value
 
 
+def _highs_bound_array(
+    dimension: int,
+    value: float | list[float] | npt.NDArray[np.float64]
+) -> npt.NDArray[np.float64]:
+    """
+    Convert scalar/list/array bounds into a NumPy array of length dimension.
+    """
+
+    if np.isscalar(value):
+        return np.full(dimension, float(value), dtype=np.float64)
+
+    value_array = np.asarray(value, dtype=np.float64)
+
+    if value_array.shape != (dimension,):
+        raise ValueError(
+            f"Bound must be scalar or shape ({dimension},), "
+            f"got shape {value_array.shape}"
+        )
+
+    return value_array.copy()
+
+
+def _remaining_time(
+    time_limit: float | None,
+    start_time: float | None
+) -> float | None:
+    """
+    Compute remaining time for the active-set algorithm.
+    """
+
+    if time_limit is None:
+        return None
+
+    if start_time is None:
+        return time_limit
+
+    remaining = time_limit - (time() - start_time)
+
+    if remaining <= 0:
+        raise RuntimeError(
+            f"HiGHS hit time limit of {time_limit} seconds "
+            f"without reaching optimality"
+        )
+
+    return remaining
+
+
+def _symmetric_matrix_for_matvec(
+    sigma: sparse.spmatrix
+) -> sparse.spmatrix:
+    """
+    HiGHS can accept a triangular sparse Hessian.
+
+    However, when computing the gradient
+
+        mu - lambda * Sigma w
+
+    we need the full symmetric matrix-vector product. If sigma is already
+    symmetric, return it. If only one triangle is stored, rebuild the full
+    symmetric matrix.
+    """
+
+    if not sparse.isspmatrix_csr(sigma):
+        sigma = sigma.tocsr()
+
+    diff = sigma - sigma.transpose()
+    diff.eliminate_zeros()
+
+    if diff.nnz == 0:
+        return sigma
+
+    return (
+        sigma
+        + sigma.transpose()
+        - sparse.diags(sigma.diagonal(), format="csr")
+    ).tocsr()
+
+
+def _solve_highs_standard_subproblem(
+    sigma: sparse.spmatrix,
+    mu: npt.NDArray[np.float64],
+    sires,
+    dams,
+    lam: float,
+    dimension: int,
+    upper_bound: npt.NDArray[np.float64] | list[float] | float,
+    lower_bound: npt.NDArray[np.float64] | list[float] | float,
+    active_set: npt.NDArray[np.bool_] | None,
+    use_quadratic: bool,
+    time_limit: float | None,
+    model_output: str,
+    debug: bool,
+    iteration: int
+) -> tuple[
+    npt.NDArray[np.float64],
+    float,
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64]
+]:
+    """
+    Solve either the initial LP or a full-dimensional restricted QP.
+
+    This function is still useful for the initial LP over all variables.
+    For the true active-set QP iterations, use
+    _solve_highs_standard_reduced_qp instead.
+    """
+
+    h = highspy.Highs()
+    model = highspy.HighsModel()
+
+    lower = _highs_bound_array(dimension, lower_bound)
+    upper = _highs_bound_array(dimension, upper_bound)
+
+    if active_set is not None:
+        lower[~active_set] = 0.0
+        upper[~active_set] = 0.0
+
+    model.lp_.model_name_ = "standard-genetics-active-set"
+    model.lp_.num_col_ = dimension
+    model.lp_.num_row_ = 2
+
+    # HiGHS minimizes, so negate the maximization objective.
+    model.lp_.col_cost_ = (-mu).tolist()
+
+    model.lp_.col_lower_ = lower.tolist()
+    model.lp_.col_upper_ = upper.tolist()
+
+    if use_quadratic:
+        model.hessian_.format_ = highspy.HessianFormat.kSquare
+        model.hessian_.dim_ = dimension
+        model.hessian_.start_ = sigma.indptr.tolist()
+        model.hessian_.index_ = sigma.indices.tolist()
+        model.hessian_.value_ = (lam * sigma.data).tolist()
+
+    # Full-dimensional M w = m.
+    model.lp_.row_lower_ = model.lp_.row_upper_ = np.full(2, 0.5).tolist()
+    model.lp_.a_matrix_.format_ = highspy.MatrixFormat.kRowwise
+    model.lp_.a_matrix_.start_ = [0, len(sires), dimension]
+    model.lp_.a_matrix_.index_ = list(sires) + list(dams)
+    model.lp_.a_matrix_.value_ = [1.0] * dimension
+
+    if not debug:
+        h.setOptionValue('output_flag', False)
+        h.setOptionValue('log_to_console', False)
+
+    pass_status: highspy._core.HighsStatus = h.passModel(model)
+
+    if model_output:
+        h.writeModel(f"{model_output}_iter_{iteration}.mps")
+
+    if pass_status == highspy.HighsStatus.kError:
+        raise ValueError(
+            f"h.passModel failed with status {h.getModelStatus()}"
+        )
+
+    if time_limit:
+        h.setOptionValue('time_limit', h.getRunTime() + time_limit)
+
+    run_status: highspy._core.HighsStatus = h.run()
+
+    if debug:
+        h.writeSolution("", 1)
+
+    model_status: highspy._core.HighsModelStatus = h.getModelStatus()
+
+    if run_status == highspy.HighsStatus.kError:
+        raise ValueError(f"h.run failed with status {model_status}")
+    elif model_status != highspy.HighsModelStatus.kOptimal:
+        raise RuntimeError(
+            f"h.run did not achieve optimality, status {model_status}"
+        )
+
+    highs_solution = h.getSolution()
+
+    solution: npt.NDArray[np.float64] = np.array(
+        highs_solution.col_value,
+        dtype=np.float64
+    )
+
+    objective_value: float = -h.getInfo().objective_function_value
+
+    row_dual: npt.NDArray[np.float64] = np.array(
+        highs_solution.row_dual,
+        dtype=np.float64
+    )
+
+    col_dual: npt.NDArray[np.float64] = np.array(
+        highs_solution.col_dual,
+        dtype=np.float64
+    )
+
+    return solution, objective_value, row_dual, col_dual
+
+
+def _solve_highs_standard_reduced_qp(
+    sigma: sparse.spmatrix,
+    mu: npt.NDArray[np.float64],
+    sires,
+    dams,
+    lam: float,
+    dimension: int,
+    upper_bound: npt.NDArray[np.float64] | list[float] | float,
+    lower_bound: npt.NDArray[np.float64] | list[float] | float,
+    active_indices: npt.NDArray[np.int_],
+    time_limit: float | None,
+    model_output: str,
+    debug: bool,
+    iteration: int
+) -> tuple[
+    npt.NDArray[np.float64],
+    float,
+    npt.NDArray[np.float64],
+    tuple[int, int]
+]:
+    """
+    Solve the truly reduced QP over active variables only.
+
+    This is the important change.
+
+    Previous implementation:
+        passed all 50 variables to HiGHS and fixed inactive variables to 0.
+
+    This implementation:
+        physically builds the reduced QP using only active variables.
+
+    If N is the current active set, the subproblem uses:
+
+        variables:  w_N only
+        Hessian:    Sigma_NN
+        mu:         mu_N
+        constraint: M_N w_N = m
+
+    Then the reduced solution is mapped back into a full-length vector.
+    """
+
+    active_indices = np.asarray(active_indices, dtype=int)
+    reduced_dimension: int = len(active_indices)
+
+    if reduced_dimension == 0:
+        raise ValueError("active_indices cannot be empty")
+
+    # ------------------------------------------------------------------
+    # Build reduced data: Sigma_NN, mu_N, bounds_N.
+    # ------------------------------------------------------------------
+    sigma_reduced = sigma[active_indices, :][:, active_indices].tocsr()
+    mu_reduced = mu[active_indices]
+
+    lower_full = _highs_bound_array(dimension, lower_bound)
+    upper_full = _highs_bound_array(dimension, upper_bound)
+
+    lower_reduced = lower_full[active_indices]
+    upper_reduced = upper_full[active_indices]
+
+    # ------------------------------------------------------------------
+    # Build reduced M_N.
+    # Row 0 = active sire variables.
+    # Row 1 = active dam variables.
+    # ------------------------------------------------------------------
+    sire_set = set(sires)
+    dam_set = set(dams)
+
+    active_sire_cols = []
+    active_dam_cols = []
+
+    for reduced_col, full_col in enumerate(active_indices):
+        if full_col in sire_set:
+            active_sire_cols.append(reduced_col)
+        elif full_col in dam_set:
+            active_dam_cols.append(reduced_col)
+        else:
+            raise RuntimeError(
+                f"Variable {full_col} is neither sire nor dam."
+            )
+
+    if len(active_sire_cols) == 0:
+        raise RuntimeError(
+            "Reduced QP has no active sire variable, "
+            "so M_N w_N = m is infeasible."
+        )
+
+    if len(active_dam_cols) == 0:
+        raise RuntimeError(
+            "Reduced QP has no active dam variable, "
+            "so M_N w_N = m is infeasible."
+        )
+
+    # ------------------------------------------------------------------
+    # Build HiGHS model with reduced_dimension columns only.
+    # ------------------------------------------------------------------
+    h = highspy.Highs()
+    model = highspy.HighsModel()
+
+    model.lp_.model_name_ = "standard-genetics-reduced-active-set"
+    model.lp_.num_col_ = reduced_dimension
+    model.lp_.num_row_ = 2
+
+    # HiGHS minimizes, so negate the maximization linear objective.
+    model.lp_.col_cost_ = (-mu_reduced).tolist()
+
+    model.lp_.col_lower_ = lower_reduced.tolist()
+    model.lp_.col_upper_ = upper_reduced.tolist()
+
+    # This is the physically reduced Hessian Sigma_NN.
+    model.hessian_.format_ = highspy.HessianFormat.kSquare
+    model.hessian_.dim_ = reduced_dimension
+    model.hessian_.start_ = sigma_reduced.indptr.tolist()
+    model.hessian_.index_ = sigma_reduced.indices.tolist()
+    model.hessian_.value_ = (lam * sigma_reduced.data).tolist()
+
+    # Reduced M_N w_N = m in row-wise CSR format.
+    model.lp_.row_lower_ = model.lp_.row_upper_ = np.full(2, 0.5).tolist()
+    model.lp_.a_matrix_.format_ = highspy.MatrixFormat.kRowwise
+    model.lp_.a_matrix_.start_ = [
+        0,
+        len(active_sire_cols),
+        reduced_dimension
+    ]
+    model.lp_.a_matrix_.index_ = active_sire_cols + active_dam_cols
+    model.lp_.a_matrix_.value_ = [1.0] * reduced_dimension
+
+    if not debug:
+        h.setOptionValue('output_flag', False)
+        h.setOptionValue('log_to_console', False)
+
+    if debug:
+        print(
+            f"\nReduced QP iteration {iteration}: "
+            f"full dimension = {dimension}, "
+            f"reduced dimension = {reduced_dimension}, "
+            f"reduced Hessian size = {sigma_reduced.shape}, "
+            f"active indices = {active_indices.tolist()}"
+        )
+
+    pass_status: highspy._core.HighsStatus = h.passModel(model)
+
+    if model_output:
+        h.writeModel(f"{model_output}_reduced_iter_{iteration}.mps")
+
+    if pass_status == highspy.HighsStatus.kError:
+        raise ValueError(
+            f"h.passModel failed with status {h.getModelStatus()}"
+        )
+
+    if time_limit:
+        h.setOptionValue('time_limit', h.getRunTime() + time_limit)
+
+    run_status: highspy._core.HighsStatus = h.run()
+
+    if debug:
+        h.writeSolution("", 1)
+
+    model_status: highspy._core.HighsModelStatus = h.getModelStatus()
+
+    if run_status == highspy.HighsStatus.kError:
+        raise ValueError(f"h.run failed with status {model_status}")
+    elif model_status != highspy.HighsModelStatus.kOptimal:
+        raise RuntimeError(
+            f"h.run did not achieve optimality, status {model_status}"
+        )
+
+    highs_solution = h.getSolution()
+
+    reduced_solution: npt.NDArray[np.float64] = np.array(
+        highs_solution.col_value,
+        dtype=np.float64
+    )
+
+    # Map reduced solution back to the original full dimension.
+    full_solution = np.zeros(dimension, dtype=np.float64)
+    full_solution[active_indices] = reduced_solution
+
+    objective_value: float = -h.getInfo().objective_function_value
+
+    row_dual: npt.NDArray[np.float64] = np.array(
+        highs_solution.row_dual,
+        dtype=np.float64
+    )
+
+    return full_solution, objective_value, row_dual, sigma_reduced.shape
+
+
+
+def _check_reduced_costs_against_fixed_full_qp(
+    sigma: sparse.spmatrix,
+    sigma_for_gradient: sparse.spmatrix,
+    mu: npt.NDArray[np.float64],
+    sires,
+    dams,
+    lam: float,
+    dimension: int,
+    upper_bound: npt.NDArray[np.float64] | list[float] | float,
+    lower_bound: npt.NDArray[np.float64] | list[float] | float,
+    active_set: npt.NDArray[np.bool_],
+    reduced_solution: npt.NDArray[np.float64],
+    reduced_row_dual: npt.NDArray[np.float64],
+    group_of_var: npt.NDArray[np.int_],
+    time_limit: float | None,
+    model_output: str,
+    debug: bool,
+    iteration: int,
+    tol: float = 1e-7
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], float]:
+    """
+    Check Julian's reduced-cost test.
+
+    Compare the reduced costs of the fixed-to-zero variables Z_h from two
+    equivalent formulations:
+
+    1. Full-dimensional QP with variables in Z_h fixed at zero.
+       HiGHS reports these as column duals.
+    2. True reduced QP over variables in N_h only.
+       The reduced costs are reconstructed from the full KKT expression.
+
+    The convention used here is the minimization convention, because HiGHS
+    solves
+
+        min -mu'w + (lambda/2) w'Sigma w.
+
+    Therefore a fixed variable should enter the reduced model only if its
+    minimization reduced cost is negative.
+    """
+
+    full_solution, _, _, full_col_dual = _solve_highs_standard_subproblem(
+        sigma=sigma,
+        mu=mu,
+        sires=sires,
+        dams=dams,
+        lam=lam,
+        dimension=dimension,
+        upper_bound=upper_bound,
+        lower_bound=lower_bound,
+        active_set=active_set,
+        use_quadratic=True,
+        time_limit=time_limit,
+        model_output=model_output,
+        # Avoid printing a second full HiGHS solution dump during the check.
+        debug=False,
+        iteration=iteration
+    )
+
+    # Minimization reduced cost:
+    #     s_i = -mu_i + lambda * (Sigma w)_i - y_group(i)
+    # where y is the HiGHS row dual for M w = m.
+    reduced_cost_from_reduced_qp = (
+        -mu
+        + lam * (sigma_for_gradient @ reduced_solution)
+        - reduced_row_dual[group_of_var]
+    )
+
+    inactive_set = ~active_set
+
+    if np.any(inactive_set):
+        differences = (
+            reduced_cost_from_reduced_qp[inactive_set]
+            - full_col_dual[inactive_set]
+        )
+        max_abs_difference = float(np.max(np.abs(differences)))
+    else:
+        max_abs_difference = 0.0
+
+    if debug:
+        solution_difference = float(
+            np.max(np.abs(full_solution - reduced_solution))
+        )
+        print("reduced-cost check against full fixed-variable QP:")
+        print(f"  max |solution_full_fixed - solution_reduced| = "
+              f"{solution_difference:.3e}")
+        print(f"  max |rc_reduced_formula - rc_full_col_dual| on Z_h = "
+              f"{max_abs_difference:.3e}")
+
+        if np.any(inactive_set):
+            inactive_indices = np.flatnonzero(inactive_set)
+            worst_order = np.argsort(
+                -np.abs(
+                    reduced_cost_from_reduced_qp[inactive_set]
+                    - full_col_dual[inactive_set]
+                )
+            )[:10]
+
+            print("  worst reduced-cost differences on fixed variables:")
+            print("    index   rc_formula(min)   rc_full_col_dual   diff")
+            for local_pos in worst_order:
+                full_idx = inactive_indices[local_pos]
+                rc_formula = reduced_cost_from_reduced_qp[full_idx]
+                rc_full = full_col_dual[full_idx]
+                print(
+                    f"    {full_idx:5d}   "
+                    f"{rc_formula:16.9e}   "
+                    f"{rc_full:16.9e}   "
+                    f"{rc_formula - rc_full: .3e}"
+                )
+
+        if max_abs_difference > tol:
+            print(
+                "  WARNING: reduced-cost check failed. "
+                "Check the sign convention for row_dual, the Hessian scaling, "
+                "or whether Sigma is being used symmetrically."
+            )
+
+    return reduced_cost_from_reduced_qp, full_col_dual, max_abs_difference
+
+
 def highs_standard_genetics(
     sigma: sparse.spmatrix,
     mu: npt.NDArray[np.float64],
@@ -481,138 +983,221 @@ def highs_standard_genetics(
     lower_bound: npt.NDArray[np.float64] | list[float] | float = 0.0,
     time_limit: float | None = None,
     model_output: str = '',
-    debug: bool = False
+    debug: bool = False,
+    max_iterations: int = 1000,
+    reduced_cost_tol: float = 1e-8,
+    active_tol: float = 1e-10,
+    check_reduced_costs: bool = False
 ) -> tuple[npt.NDArray[np.float64], float]:
     """
     Solve the standard genetic selection problem using HiGHS.
 
-    Given a standard genetic selection problem
-    ```
-        max_w w'mu - (lambda/2)*w'*sigma*w
-        subject to lb <= w <= ub,
-                   w_S*e_S = 1/2,
-                   w_D*e_D = 1/2,
-    ```
-    this function uses HiGHS to find the optimum w and the objective for that
-    portfolio. Additional parameters give control over long HiGHS can spend
-    on the problem, to prevent indefinite hangs.
+    This version implements a true reduced active-set method.
 
-    Parameters
-    ----------
-    sigma : spmatrix
-        Covariance matrix of the candidates in the cohorts for selection.
-    mu : ndarray
-        Vector of expected returns for candidates in the cohorts for selection.
-    sires : Any
-        An object representing an index set for sires (male candidates) in the
-        cohort. Type is not restricted.
-    dams : Any
-        An object representing an index set for dams (female candidates) in the
-        cohort. Type is not restricted.
-    lam : float
-        Lambda value to optimize for, which controls the balance between risk
-        and return. Lower values will give riskier portfolios, higher values
-        more conservative ones.
-    dimension : int
-        Number of candidates in the cohort, i.e. the dimension of the problem.
-    upper_bound : ndarray, list, or float, optional
-        Upper bound on how much each candidate can contribute. Can be an array
-        of differing bounds for each candidate, or a float which applies to all
-        candidates. Default value is `1.0`.
-    lower_bound : ndarray, list, or float, optional
-        Lower bound on how much each candidate can contribute. Can be an array
-        of differing bounds for each candidate, or a float which applies to all
-        candidates. Default value is `0.0`.
-    time_limit : float or None, optional
-        Maximum amount of time in seconds to give HiGHS to solve the problem.
-        Default value is `None`, i.e. no time limit.
-    model_output : str, optional
-        Flag which controls whether Gurobi saves the model file to the working
-        directory. If given, the string is used as the file name, 'str.mps',
-        Default value is the empty string, i.e. the file isn't saved.
-    debug : bool, optional
-        Flag which controls whether Gurobi prints its output to terminal.
-        Default value is `False`.
+    Step 0:
+        Solve the LP over all variables:
 
-    Returns
-    -------
-    ndarray
-        Portfolio vector which HiGHS has determined is a solution.
-    float
-        Value of the objective function for returned solution vector.
+            max mu'w
+            subject to M w = m,
+                       0 <= w <= upper_bound.
+
+        Let N_0 = {i : w_i > 0}.
+
+    Step h:
+        Solve the truly reduced QP over variables in N_h only:
+
+            max w_N' mu_N - lambda/2 w_N' Sigma_NN w_N
+            subject to M_N w_N = m,
+                       0 <= w_N <= upper_bound_N.
+
+        Then compute minimization reduced costs for inactive variables using
+        the full KKT condition. If all inactive reduced costs are non-negative,
+        stop. Otherwise add variables with negative reduced cost to N_h.
+
+        If check_reduced_costs=True, also solve the full-dimensional QP with
+        variables in Z_h fixed to zero and compare its HiGHS column duals with
+        the reduced costs reconstructed from the truly reduced QP.
     """
 
-    # initialise an empty model
-    h = highspy.Highs()
-    model = highspy.HighsModel()
+    if not sparse.isspmatrix_csr(sigma):
+        sigma = sigma.tocsr()
 
-    # NOTE HiGHS doesn't support typing for model parameters
-    model.lp_.model_name_ = "standard-genetics"
-    model.lp_.num_col_ = dimension
-    model.lp_.num_row_ = 2
+    mu = np.asarray(mu, dtype=np.float64)
+    sires = list(sires)
+    dams = list(dams)
 
-    # HiGHS does minimization so negate objective
-    model.lp_.col_cost_ = -mu
+    lower = _highs_bound_array(dimension, lower_bound)
+    upper = _highs_bound_array(dimension, upper_bound)
 
-    # bounds on w using a helper function
-    model.lp_.col_lower_ = highs_bound_like(dimension, lower_bound)
-    model.lp_.col_upper_ = highs_bound_like(dimension, upper_bound)
+    # Since inactive variables are excluded from the reduced QP, they must
+    # be allowed to take value 0 in the original problem.
+    if np.any(lower > active_tol):
+        raise ValueError(
+            "True reduced active-set method assumes inactive variables "
+            "can be excluded, so lower_bound must be 0 for all variables."
+        )
 
-    # define the quadratic term in the objective
-    model.hessian_.format_ = highspy.HessianFormat.kSquare
-    model.hessian_.dim_ = dimension
-    model.hessian_.start_ = sigma.indptr
-    model.hessian_.index_ = sigma.indices
-    # HiGHS multiplies Hessian by 1/2 so just need factor of lambda
-    model.hessian_.value_ = lam*sigma.data
+    start_time = time() if time_limit else None
 
-    # add Mx = m to the model using CSR format. for M it's less efficient than
-    # if it were stored densely, but HiGHS requires CSR for input
-    model.lp_.row_lower_ = model.lp_.row_upper_ = np.full(2, 0.5)
-    model.lp_.a_matrix_.format_ = highspy.MatrixFormat.kRowwise
-    model.lp_.a_matrix_.start_ = [0, len(sires), dimension]
-    model.lp_.a_matrix_.index_ = list(sires) + list(dams)
-    model.lp_.a_matrix_.value_ = [1]*dimension
+    # For reduced-cost calculation we need full symmetric Sigma for matvec.
+    sigma_for_gradient = _symmetric_matrix_for_matvec(sigma)
 
-    # HiGHS spews all its output into the terminal by default, this restricts
-    # that behaviour to only happen when the `debug` flag is used.
-    if not debug:
-        h.setOptionValue('output_flag', False)
-        h.setOptionValue('log_to_console', False)
+    # ------------------------------------------------------------------
+    # Step 0: LP initialization over all variables.
+    # ------------------------------------------------------------------
+    w_lp, _, _, _ = _solve_highs_standard_subproblem(
+        sigma=sigma,
+        mu=mu,
+        sires=sires,
+        dams=dams,
+        lam=lam,
+        dimension=dimension,
+        upper_bound=upper_bound,
+        lower_bound=lower_bound,
+        active_set=None,
+        use_quadratic=False,
+        time_limit=_remaining_time(time_limit, start_time),
+        model_output=model_output,
+        debug=debug,
+        iteration=-1
+    )
 
-    # HiGHS' passModel returns a status indicating its success
-    pass_status: highspy._core.HighsStatus = h.passModel(model)
-    # model file must be saved between passModel and any error
-    if model_output:
-        h.writeModel(f"{model_output}.mps")
-    # HiGHS will try to continue if it gets an error, so stop it
-    if pass_status == highspy.HighsStatus.kError:
-        raise ValueError(f"h.passModel failed with status "
-                         f"{h.getModelStatus()}")
+    active_set: npt.NDArray[np.bool_] = w_lp > active_tol
 
-    # optional controls to stop HiGHS taking too long (see issue #16)
-    if time_limit:
-        h.setOptionValue('time_limit', h.getRunTime() + time_limit)
+    # Safety: ensure the reduced QP contains at least one sire and one dam.
+    if not np.any(active_set[sires]):
+        best_sire = sires[int(np.argmax(mu[sires]))]
+        active_set[best_sire] = True
 
-    # HiGHS' run returns a status indicating its success
-    run_status: highspy._core.HighsStatus = h.run()
-    # solution (with dual info) must be printed between run and any error
-    if debug:
-        h.writeSolution("", 1)
-    mod_status: highspy._core.HighsModelStatus = h.getModelStatus()
-    # HiGHS will try to continue if it gets an error, so stop it
-    if run_status == highspy.HighsStatus.kError:
-        raise ValueError(f"h.run failed with status {mod_status}")
-    elif mod_status != highspy.HighsModelStatus.kOptimal:
-        raise RuntimeError(f"h.run did not achieve optimality, status "
-                           f"{mod_status}")
+    if not np.any(active_set[dams]):
+        best_dam = dams[int(np.argmax(mu[dams]))]
+        active_set[best_dam] = True
 
-    # by default, col_value is a stock-Python list
-    solution: npt.NDArray[np.float64] = np.array(h.getSolution().col_value)
-    # we negated the objective function, so negate it back
-    objective_value: float = -h.getInfo().objective_function_value
+    # group_of_var[i] tells which equality row variable i belongs to:
+    # 0 = sire row, 1 = dam row.
+    group_of_var = np.empty(dimension, dtype=int)
+    group_of_var[sires] = 0
+    group_of_var[dams] = 1
 
-    return solution, objective_value
+    final_solution: npt.NDArray[np.float64] | None = None
+    final_objective_value: float | None = None
+
+    # ------------------------------------------------------------------
+    # Active-set loop using true reduced QP.
+    # ------------------------------------------------------------------
+    for iteration in range(max_iterations):
+        active_indices = np.flatnonzero(active_set)
+
+        solution, objective_value, row_dual, reduced_hessian_shape = (
+            _solve_highs_standard_reduced_qp(
+                sigma=sigma,
+                mu=mu,
+                sires=sires,
+                dams=dams,
+                lam=lam,
+                dimension=dimension,
+                upper_bound=upper_bound,
+                lower_bound=lower_bound,
+                active_indices=active_indices,
+                time_limit=_remaining_time(time_limit, start_time),
+                model_output=model_output,
+                debug=debug,
+                iteration=iteration
+            )
+        )
+
+        final_solution = solution
+        final_objective_value = objective_value
+
+        # HiGHS solves the minimization problem
+        #
+        #     min -mu'w + (lambda/2) w'Sigma w.
+        #
+        # With HiGHS' row-dual sign convention, the minimization reduced
+        # cost for a variable fixed at its lower bound is
+        #
+        #     s_i = -mu_i + lambda * (Sigma w)_i - row_dual[group(i)].
+        #
+        # For a minimization problem, only variables with negative reduced
+        # cost should be unfixed / added to the reduced QP.
+        reduced_cost_min: npt.NDArray[np.float64] = (
+            -mu
+            + lam * (sigma_for_gradient @ solution)
+            - row_dual[group_of_var]
+        )
+
+        inactive_set = ~active_set
+
+        if check_reduced_costs:
+            (
+                reduced_cost_min,
+                full_fixed_col_dual,
+                reduced_cost_check_gap
+            ) = _check_reduced_costs_against_fixed_full_qp(
+                sigma=sigma,
+                sigma_for_gradient=sigma_for_gradient,
+                mu=mu,
+                sires=sires,
+                dams=dams,
+                lam=lam,
+                dimension=dimension,
+                upper_bound=upper_bound,
+                lower_bound=lower_bound,
+                active_set=active_set,
+                reduced_solution=solution,
+                reduced_row_dual=row_dual,
+                group_of_var=group_of_var,
+                time_limit=_remaining_time(time_limit, start_time),
+                model_output=model_output,
+                debug=debug,
+                iteration=iteration,
+                tol=1e-7
+            )
+
+        entering_set = (
+            inactive_set
+            & (upper > active_tol)
+            & (reduced_cost_min < -reduced_cost_tol)
+        )
+
+        if debug:
+            if np.any(inactive_set):
+                min_inactive_reduced_cost = np.min(
+                    reduced_cost_min[inactive_set]
+                )
+                max_inactive_reduced_cost = np.max(
+                    reduced_cost_min[inactive_set]
+                )
+            else:
+                min_inactive_reduced_cost = None
+                max_inactive_reduced_cost = None
+
+            print(
+                f"active-set iteration {iteration}: "
+                f"active variables = {np.sum(active_set)}, "
+                f"reduced Hessian size = {reduced_hessian_shape}, "
+                f"min inactive reduced cost = "
+                f"{min_inactive_reduced_cost}, "
+                f"max inactive reduced cost = "
+                f"{max_inactive_reduced_cost}"
+            )
+
+            if np.any(entering_set):
+                print(
+                    "entering variables = "
+                    f"{np.flatnonzero(entering_set).tolist()}"
+                )
+
+        # Stop when all inactive variables have non-negative reduced cost.
+        if not np.any(entering_set):
+            return final_solution, final_objective_value
+
+        active_set[entering_set] = True
+
+    raise RuntimeError(
+        f"True reduced active-set HiGHS solver did not converge after "
+        f"{max_iterations} iterations"
+    )
 
 
 def highs_robust_genetics_sqp(
