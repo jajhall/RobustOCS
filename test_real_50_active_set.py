@@ -1,7 +1,7 @@
 import numpy as np
 import robustocs as rocs
 
-from robustocs.solvers import highs_standard_genetics
+from robustocs.solvers2 import highs_standard_genetics
 
 
 sigma, mu, omega, n, sires, dams, names = rocs.load_problem(

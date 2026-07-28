@@ -1,12 +1,9 @@
-# -*- coding: utf-8 -*-
 """Defining Solvers
 
 With an optimal contribution selection problems properly loaded into Python,
 `solvers` contains functions for solving those under various formulations and
 methods.
 
-Documentation is available in the docstrings and online at
-https://github.com/Foggalong/RobustOCS/wiki
 """
 
 import numpy as np          # defines matrix structures

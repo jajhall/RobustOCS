@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Defining Solvers
 
 With an optimal contribution selection problems properly loaded into Python,
