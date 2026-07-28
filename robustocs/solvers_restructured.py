@@ -1,9 +1,12 @@
+# -*- coding: utf-8 -*-
 """Defining Solvers
 
 With an optimal contribution selection problems properly loaded into Python,
 `solvers` contains functions for solving those under various formulations and
 methods.
 
+Documentation is available in the docstrings and online at
+https://github.com/Foggalong/RobustOCS/wiki
 """
 
 import numpy as np          # defines matrix structures
@@ -1392,12 +1395,12 @@ def highs_standard_genetics(
     return general_w, general_objective
 
 def highs_robust_genetics_sqp(
-    sigma: sparse.spmatrix,
+    sigma: npt.NDArray[np.float64] | sparse.spmatrix,
     mubar: npt.NDArray[np.float64],
     omega: npt.NDArray[np.float64] | sparse.spmatrix,
-    sires,  # type could be np.ndarray, sets[ints], lists[int], range, etc
-    dams,   # type could be np.ndarray, sets[ints], lists[int], range, etc
-    lam: float,  # cannot be called `lambda`, that's reserved in Python
+    sires,
+    dams,
+    lam: float,
     kappa: float,
     dimension: int,
     upper_bound: npt.NDArray[np.float64] | list[float] | float = 1.0,
@@ -1406,215 +1409,275 @@ def highs_robust_genetics_sqp(
     max_iterations: int = 1000,
     robust_gap_tol: float = 1e-7,
     model_output: str = '',
-    debug: bool = False
+    debug: bool = False,
+    qp_max_iterations: int = 1000,
+    reduced_cost_tol: float = 1e-8,
+    active_tol: float = 1e-10
 ) -> tuple[npt.NDArray[np.float64], float, float]:
-    """
-    Solve the robust genetic selection problem using SQP in HiGHS.
+    """Solve robust optimal contribution selection by SQP.
 
-    Given a robust genetic selection problem
-    ```
-        max_w (min_mu w'mu subject to mu in U) - (lambda/2)*w'*sigma*w
-        subject to lb <= w <= ub,
-                   w_S*e_S = 1/2,
-                   w_D*e_D = 1/2,
-    ```
-    where U is a quadratic uncertainty set for mu~N(mubar, omega), this
-    function uses HiGHS to find the optimum w and the objective for that
-    portfolio. It does this using sequential quadratic programming (SQP),
-    approximating the conic constraint associated with robustness using
-    a series of linear constraints.
+    The robust OCS model chooses non-negative candidate contributions ``w``
+    while balancing estimated genetic merit against coancestry and uncertainty:
 
-    Parameters
-    ----------
-    sigma : spmatrix
-        Covariance matrix of the candidates in the cohorts for selection.
-    mubar : ndarray
-        Vector of expected values of the expected returns for candidates in the
-        cohort for selection.
-    omega : ndarray or spmatrix   # TODO this doesn't *have* to be an spmatrix
-        Covariance matrix for expected returns for candidates in the cohort for
-        selection.
-    sires : Any
-        An object representing an index set for sires (male candidates) in the
-        cohort. Type is not restricted.
-    dams : Any
-        An object representing an index set for dams (female candidates) in the
-        cohort. Type is not restricted.
-    lam : float
-        Lambda value to optimize for, which controls the balance between risk
-        and return. Lower values will give riskier portfolios, higher values
-        more conservative ones.
-    kappa : float
-        Kappa value to optimize for, which controls how resilient the solution
-        must be to variation in expected values.
-    dimension : int
-        Number of candidates in the cohort, i.e. the dimension of the problem.
-    upper_bound : ndarray, list, or float, optional
-        Upper bound on how much each candidate can contribute. Can be an array
-        of differing bounds for each candidate, or a float which applies to all
-        candidates. Default value is `1.0`.
-    lower_bound : ndarray, list, or float, optional
-        Lower bound on how much each candidate can contribute. Can be an array
-        of differing bounds for each candidate, or a float which applies to all
-        candidates. Default value is `0.0`.
-    time_limit : float or None, optional
-        Maximum amount of time in seconds to give HiGHS to solve the problem.
-        Default value is `None`, i.e. no time limit.
-    max_iterations : int, optional
-        Maximum number of iterations that can be taken in solving the problem,
-        i.e. the maximum number of constraints to use to approximate the conic
-        constraint. Default value is `1000`.
-    robust_gap_tol : float, optional
-        Tolerance when checking whether an approximating constraint is active
-        and whether the SQP overall has converged. Default value is 10^-7.
-    model_output : str, optional
-        Flag which controls whether Gurobi saves the model file to the working
-        directory. If given, the string is used as the file name, 'str.mps',
-        Default value is the empty string, i.e. the file isn't saved.
-    debug : bool, optional
-        Flag which controls whether Gurobi prints its output to terminal.
-        Default value is `False`.
+        maximise  mubar.T w
+                  - (lam / 2) w.T sigma w
+                  - kappa sqrt(w.T omega w)
+
+        subject to sum(w[sires]) = 0.5,
+                   sum(w[dams])  = 0.5,
+                   lower_bound <= w <= upper_bound.
+
+    An auxiliary variable ``z`` represents ``sqrt(w.T omega w)``.  The SQP
+    method replaces the nonlinear condition ``z >= sqrt(w.T omega w)`` by a
+    growing collection of tangent-plane inequalities.  At outer iteration k,
+    the current contribution vector ``w_k`` gives
+
+        alpha_k = sqrt(w_k.T omega w_k)
+
+    and the new plane is
+
+        z - ((omega w_k) / alpha_k).T w >= 0.
+
+    Every resulting convex QP is written in the combined variable
+    ``x = [w, z]`` and solved by ``highs_active_set_qp`` from ``qp_solver.py``.
+    The outer iterations stop when ``z`` agrees with the true uncertainty norm
+    to within ``robust_gap_tol``.
 
     Returns
     -------
     ndarray
-        Portfolio vector which Gurobi has determined is a solution.
+        The robust contribution vector ``w``.
     float
-        Auxiliary variable corresponding to uncertainty associated with the
-        portfolio vector which Gurobi has determined is a solution.
+        The final auxiliary uncertainty value ``z``.
     float
-        Value of the objective function for returned solution vector.
+        The robust maximisation objective evaluated using the QP solution.
     """
 
-    # initialise an empty model
-    h = highspy.Highs()
-    model = highspy.HighsModel()
+    if sparse.issparse(sigma):
+        sigma_csr = sigma.tocsr().astype(np.float64)
+    else:
+        sigma_csr = sparse.csr_matrix(
+            np.asarray(sigma, dtype=np.float64)
+        )
 
-    # use value for infinity from HiGHS
-    inf = highspy.kHighsInf
+    if sparse.issparse(omega):
+        omega_csr = omega.tocsr().astype(np.float64)
+    else:
+        omega_csr = sparse.csr_matrix(
+            np.asarray(omega, dtype=np.float64)
+        )
 
-    # NOTE HiGHS doesn't support typing for model parameters
-    model.lp_.model_name_ = "robust-genetics"
-    model.lp_.num_col_ = dimension
-    model.lp_.num_row_ = 2
+    mubar = np.asarray(mubar, dtype=np.float64)
+    sires = list(sires)
+    dams = list(dams)
 
-    # HiGHS does minimization so negate objective
-    model.lp_.col_cost_ = -mubar
+    if sigma_csr.shape != (dimension, dimension):
+        raise ValueError(
+            f"sigma must have shape ({dimension}, {dimension}), "
+            f"got {sigma_csr.shape}."
+        )
+    if omega_csr.shape != (dimension, dimension):
+        raise ValueError(
+            f"omega must have shape ({dimension}, {dimension}), "
+            f"got {omega_csr.shape}."
+        )
+    if mubar.shape != (dimension,):
+        raise ValueError(
+            f"mubar must have shape ({dimension},), got {mubar.shape}."
+        )
+    if lam < 0:
+        raise ValueError("lam must be non-negative for a convex QP.")
+    if kappa < 0:
+        raise ValueError("kappa must be non-negative.")
 
-    # bounds on w using a helper function
-    model.lp_.col_lower_ = highs_bound_like(dimension, lower_bound)
-    model.lp_.col_upper_ = highs_bound_like(dimension, upper_bound)
+    lower_w = _highs_bound_array(dimension, lower_bound)
+    upper_w = _highs_bound_array(dimension, upper_bound)
 
-    # define the quadratic term in the objective
-    model.hessian_.format_ = highspy.HessianFormat.kSquare
-    model.hessian_.dim_ = dimension
-    model.hessian_.start_ = sigma.indptr
-    model.hessian_.index_ = sigma.indices
-    # # # HiGHS multiplies Hessian by 1/2 so just need factor of lambda
-    model.hessian_.value_ = lam*sigma.data
+    if np.any(lower_w < -active_tol):
+        raise ValueError("Robust OCS contributions must be non-negative.")
 
-    # add Mx = m to the model using CSR format
-    model.lp_.row_lower_ = model.lp_.row_upper_ = np.full(2, 0.5)
-    model.lp_.a_matrix_.format_ = highspy.MatrixFormat.kRowwise
-    model.lp_.a_matrix_.start_ = [0, len(sires), dimension]
-    model.lp_.a_matrix_.index_ = list(sires) + list(dams)
-    model.lp_.a_matrix_.value_ = [1]*dimension
+    # Complete symmetric matrices are required for the uncertainty norm and
+    # objective checks even when only one sparse triangle is stored in a file.
+    sigma_full = _symmetric_matrix_for_matvec(sigma_csr)
+    omega_full = _symmetric_matrix_for_matvec(omega_csr)
 
-    # HiGHS' passModel returns a status indicating its success
-    pass_status: highspy._core.HighsStatus = h.passModel(model)
-    # model file must be saved between passModel and any error
-    if model_output:
-        h.writeModel(f"{model_output}.mps")
-    # HiGHS will try to continue if it gets an error, so stop it
-    if pass_status == highspy.HighsStatus.kError:
-        raise ValueError(f"h.passModel failed with status "
-                         f"{h.getModelStatus()}")
+    qp_dimension = dimension + 1
 
-    # add z variable with bound 0 < z < inf and cost kappa
-    h.addVar(0, highspy.kHighsInf)
-    h.changeColCost(dimension, kappa)
+    # x = [w, z] and
+    # min  -mubar.T w + (lam/2) w.T sigma w + kappa z.
+    hessian = sparse.block_diag(
+        (
+            lam * sigma_csr,
+            sparse.csr_matrix((1, 1), dtype=np.float64)
+        ),
+        format="csr"
+    )
+    linear_cost = np.concatenate(
+        (
+            -mubar,
+            np.array([kappa], dtype=np.float64)
+        )
+    )
 
-    # HiGHS spews all its output into the terminal by default, this restricts
-    # that behaviour to only happen when the `debug` flag is used.
-    if not debug:
-        h.setOptionValue('output_flag', False)
-        h.setOptionValue('log_to_console', False)
+    lower_x = np.concatenate(
+        (
+            lower_w,
+            np.array([0.0], dtype=np.float64)
+        )
+    )
+    upper_x = np.concatenate(
+        (
+            upper_w,
+            np.array([highspy.kHighsInf], dtype=np.float64)
+        )
+    )
 
-    # optional controls to stop HiGHS taking too long
-    if time_limit:
-        time_remaining: float = time_limit
+    # The first two rows are the OCS sex-balance equalities.  Their z
+    # coefficients are zero.  SQP tangent planes are appended below them.
+    base_matrix = np.zeros((2, qp_dimension), dtype=np.float64)
+    base_matrix[0, sires] = 1.0
+    base_matrix[1, dams] = 1.0
 
-    for i in range(max_iterations):
-        # use at most the remaining unused time (see issue #16)
-        if time_limit:
-            h.setOptionValue('time_limit', h.getRunTime() + time_remaining)
-            start_time: float = time()
+    base_row_lower = np.full(2, 0.5, dtype=np.float64)
+    base_row_upper = np.full(2, 0.5, dtype=np.float64)
 
-        try:
-            run_status: highspy._core.HighsStatus = h.run()
-        except RuntimeError as e:
-            raise RuntimeError(f"HiGHS failed with error:\n{e}")
+    plane_rows: list[npt.NDArray[np.float64]] = []
+    overall_start = time() if time_limit is not None else None
 
-        # subtract time taken from time remaining
-        if time_limit:
-            time_remaining -= time() - start_time
-            if time_remaining < 0:
-                raise RuntimeError(f"HiGHS hit time limit of {time_limit} "
-                                   f"seconds without reaching optimality")
+    final_w: npt.NDArray[np.float64] | None = None
+    final_z: float | None = None
+    final_objective: float | None = None
 
-        # return model and solution at every approximation to help debug
-        if model_output:
-            h.writeModel(f"{model_output}.mps")
+    for sqp_iteration in range(max_iterations):
+        if plane_rows:
+            constraint_matrix = np.vstack([base_matrix, *plane_rows])
+            number_of_planes = len(plane_rows)
+            row_lower = np.concatenate(
+                (
+                    base_row_lower,
+                    np.zeros(number_of_planes, dtype=np.float64)
+                )
+            )
+            row_upper = np.concatenate(
+                (
+                    base_row_upper,
+                    np.full(
+                        number_of_planes,
+                        highspy.kHighsInf,
+                        dtype=np.float64
+                    )
+                )
+            )
+        else:
+            constraint_matrix = base_matrix.copy()
+            row_lower = base_row_lower.copy()
+            row_upper = base_row_upper.copy()
+
+        iteration_output = (
+            f"{model_output}_sqp_{sqp_iteration}"
+            if model_output
+            else ""
+        )
+
+        solution, minimum_objective = highs_active_set_qp(
+            hessian=hessian,
+            linear_cost=linear_cost,
+            constraint_matrix=constraint_matrix,
+            row_lower=row_lower,
+            row_upper=row_upper,
+            lower_bound=lower_x,
+            upper_bound=upper_x,
+            time_limit=_remaining_time(time_limit, overall_start),
+            model_output=iteration_output,
+            debug=debug,
+            max_iterations=qp_max_iterations,
+            reduced_cost_tol=reduced_cost_tol,
+            active_tol=active_tol,
+            full_qp_fallback=True
+        )
+
+        w_star = np.asarray(solution[:dimension], dtype=np.float64)
+        z_star = float(solution[-1])
+
+        uncertainty_squared = float(
+            w_star.transpose() @ (omega_full @ w_star)
+        )
+        if uncertainty_squared < -robust_gap_tol:
+            raise RuntimeError(
+                "The uncertainty quadratic form is negative beyond the "
+                f"numerical tolerance: {uncertainty_squared:.3e}."
+            )
+
+        alpha = sqrt(max(0.0, uncertainty_squared))
+        robust_gap = alpha - z_star
+
+        coancestry = float(
+            w_star.transpose() @ (sigma_full @ w_star)
+        )
+        objective_value = float(
+            mubar.transpose() @ w_star
+            - 0.5 * lam * coancestry
+            - kappa * z_star
+        )
+
+        final_w = w_star
+        final_z = z_star
+        final_objective = objective_value
+
         if debug:
-            h.writeSolution("", 1)
+            print(
+                f"SQP iteration {sqp_iteration}: "
+                f"planes={len(plane_rows)}, "
+                f"z={z_star:.12e}, "
+                f"sqrt(w^T omega w)={alpha:.12e}, "
+                f"gap={robust_gap:.3e}, "
+                f"QP objective={-minimum_objective:.12e}"
+            )
 
-        # evaluate HiGHS' return value from h.run and attempt to solve
-        model_status: highspy._core.HighsModelStatus = h.getModelStatus()
-        # HiGHS will try to continue if it gets an error, so stop it
-        if run_status == highspy.HighsStatus.kError:
-            raise RuntimeError(f"HiGHS at approximation #{i} failed with "
-                               f"status {model_status}")
-        elif model_status != highspy.HighsModelStatus.kOptimal:
-            raise RuntimeError(f"HiGHS did not achieve optimality at "
-                               f"approximation #{i}, status {model_status}")
+        if abs(robust_gap) <= robust_gap_tol:
+            return final_w, final_z, final_objective
 
-        # by default, col_value is a stock-Python list
-        solution: list[float] = h.getSolution().col_value
-        w_star: npt.NDArray[np.float64] = np.array(solution[:-1])
-        z_star: float = solution[-1]
+        # Use the normalised tangent plane written in equation (10):
+        #
+        #     z - ((Omega w_k) / alpha_k)^T w >= 0,
+        #
+        # where alpha_k = sqrt(w_k^T Omega w_k).  This is algebraically
+        # equivalent to alpha_k z - (Omega w_k)^T w >= 0, but fixing the
+        # coefficient of z to one gives all accumulated planes a much more
+        # consistent numerical scale.
+        if alpha <= active_tol:
+            raise RuntimeError(
+                "SQP cannot form a tangent plane because "
+                "sqrt(w^T omega w) is numerically zero."
+            )
 
-        # we negated the objective function, so negate it back
-        objective_value: float = -h.getInfo().objective_function_value
+        uncertainty_gradient = np.asarray(
+            omega_full @ w_star,
+            dtype=np.float64,
+        ).reshape(-1) / alpha
 
-        if debug:
-            print(f"{i}: {w_star}, {objective_value:g}")
+        plane_row = np.concatenate(
+            (
+                -uncertainty_gradient,
+                np.array([1.0], dtype=np.float64),
+            )
+        )
 
-        # assess which constraints are currently active
-        active_const: bool = False
-        constraints = h.getBasis().row_status
-        for c in range(len(constraints)-2):  # first two are sum-to-half
-            if constraints[c+2] == highspy.HighsBasisStatus.kBasic:
-                active_const = True
-                if debug:
-                    print(f"P{c} active")  # don't have slack values
-        if debug and not active_const:
-            print("No active constraints!")
+        if not np.all(np.isfinite(plane_row)):
+            raise RuntimeError(
+                "SQP generated a non-finite tangent-plane row."
+            )
 
-        # z coefficient for the new constraint
-        alpha: float = sqrt(w_star.transpose()@omega@w_star)
+        plane_rows.append(plane_row)
 
-        # if gap between z and w'Omega w has converged, done
-        if abs(z_star - alpha) < robust_gap_tol:
-            break
+    if final_w is None or final_z is None or final_objective is None:
+        raise RuntimeError("Robust SQP did not solve any QP subproblem.")
 
-        # add a new plane to the approximation of the uncertainty cone
-        num_nz: int = dimension + 1  # HACK assuming entirely dense
-        index: range = range(dimension + 1)
-        value: npt.NDArray[np.float64] = np.append(-omega@w_star, alpha)
-        h.addRow(0, inf, num_nz, index, value)
-
-    # final value of solution is the z value, return separately
-    return w_star, z_star, objective_value
+    raise RuntimeError(
+        "Robust OCS SQP did not converge after "
+        f"{max_iterations} outer iterations.  "
+        f"Last uncertainty gap was {robust_gap:.3e}."
+    )
 
 
 # make highs_robust_genetics(...) an alias of the fastest method

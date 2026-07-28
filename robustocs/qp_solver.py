@@ -5,11 +5,13 @@ The solver in this module is deliberately independent of Optimal Contribution
 Selection.  It solves convex QP subproblems of the form
 
     minimise    c^T x + 1/2 x^T Q x
-    subject to  M x = m,
+    subject to  row_lower <= M x <= row_upper,
                 lower <= x <= upper.
 
-For the robust OCS SQP method, ``x`` is the combined vector ``[w, z]`` and
-each SQP iteration can append another row to ``M`` and another entry to ``m``.
+Equality constraints are represented by identical row lower and upper bounds.
+For robust OCS, ``x`` is the combined vector ``[w, z]``.  The two sex-balance
+rows are equalities, while every SQP iteration appends a tangent-plane
+inequality for the uncertainty term.
 """
 
 from time import time
@@ -27,6 +29,18 @@ Bound = float | list[float] | npt.NDArray[np.float64]
 # Keep the numerical QP solves more accurate than the active-set reduced-cost
 # threshold, so variables are not added or rejected because of solver noise.
 _HIGHS_KKT_TOL = 1e-9
+
+
+class _HighsSubproblemError(RuntimeError):
+    """Internal exception carrying the HiGHS model status."""
+
+    def __init__(
+        self,
+        message: str,
+        model_status: highspy.HighsModelStatus
+    ) -> None:
+        super().__init__(message)
+        self.model_status = model_status
 
 
 def _bound_array(dimension: int, value: Bound) -> npt.NDArray[np.float64]:
@@ -92,19 +106,26 @@ def _validate_qp_data(
     hessian: sparse.spmatrix,
     linear_cost: npt.NDArray[np.float64],
     constraint_matrix: npt.NDArray[np.float64],
-    rhs: npt.NDArray[np.float64],
+    row_lower: npt.NDArray[np.float64],
+    row_upper: npt.NDArray[np.float64],
     lower: npt.NDArray[np.float64],
     upper: npt.NDArray[np.float64]
 ) -> None:
-    """Validate dimensions and simple bound conditions."""
+    """Validate QP dimensions and variable/row bounds."""
 
     dimension = linear_cost.size
-    number_of_constraints = rhs.size
+    number_of_constraints = row_lower.size
 
     if hessian.shape != (dimension, dimension):
         raise ValueError(
             f"hessian must have shape ({dimension}, {dimension}), "
             f"got {hessian.shape}."
+        )
+
+    if row_upper.shape != (number_of_constraints,):
+        raise ValueError(
+            "row_lower and row_upper must have the same one-dimensional "
+            "shape."
         )
 
     if constraint_matrix.shape != (number_of_constraints, dimension):
@@ -118,14 +139,115 @@ def _validate_qp_data(
         raise ValueError("Bounds must have one entry per decision variable.")
 
     if np.any(lower > upper):
-        raise ValueError("Every lower bound must be no greater than its upper bound.")
+        raise ValueError(
+            "Every variable lower bound must be no greater than its upper "
+            "bound."
+        )
+
+    if np.any(row_lower > row_upper):
+        raise ValueError(
+            "Every row lower bound must be no greater than its upper bound."
+        )
+
+
+def _enlarge_degenerate_initial_set(
+    active_set: npt.NDArray[np.bool_],
+    lp_solution: npt.NDArray[np.float64],
+    hessian: sparse.csr_matrix,
+    linear_cost: npt.NDArray[np.float64],
+    constraint_matrix: npt.NDArray[np.float64],
+    row_lower: npt.NDArray[np.float64],
+    row_upper: npt.NDArray[np.float64],
+    upper: npt.NDArray[np.float64],
+    active_tol: float
+) -> npt.NDArray[np.bool_]:
+    """Add a variable when the LP active set has no free QP direction.
+
+    The LP used to initialise the variable set can return a vertex with exactly
+    as many positive variables as independent tight rows.  In that case the
+    reduced feasible region is a single point.  Some versions/configurations of
+    the HiGHS active-set QP solver return ``kSolveError`` for such a
+    zero-dimensional reduced QP.
+
+    Adding one admissible inactive variable is mathematically harmless: the
+    variable is merely made available to the reduced QP and may still receive
+    value zero.  It also creates at least one possible reduced direction.
+
+    The candidate is selected using the QP stationarity expression evaluated
+    at the LP point without row multipliers,
+
+        c + Q x,
+
+    with the smallest value preferred for this minimisation problem.
+    """
+
+    active_set = np.asarray(active_set, dtype=bool).copy()
+    activity = constraint_matrix @ lp_solution
+
+    equality_rows = np.isclose(
+        row_lower,
+        row_upper,
+        atol=active_tol,
+        rtol=0.0,
+    )
+    tight_lower = np.isfinite(row_lower) & np.isclose(
+        activity,
+        row_lower,
+        atol=active_tol,
+        rtol=0.0,
+    )
+    tight_upper = np.isfinite(row_upper) & np.isclose(
+        activity,
+        row_upper,
+        atol=active_tol,
+        rtol=0.0,
+    )
+    tight_rows = equality_rows | tight_lower | tight_upper
+
+    while True:
+        active_indices = np.flatnonzero(active_set)
+
+        if active_indices.size == 0:
+            rank = 0
+        elif np.any(tight_rows):
+            active_matrix = constraint_matrix[
+                tight_rows, :
+            ][:, active_indices]
+            rank = int(np.linalg.matrix_rank(active_matrix))
+        else:
+            rank = 0
+
+        # A strictly larger number of active variables than independent tight
+        # rows gives the reduced QP at least one potential feasible direction.
+        if active_indices.size > rank:
+            return active_set
+
+        candidates = np.flatnonzero(
+            (~active_set) & (upper > active_tol)
+        )
+        if candidates.size == 0:
+            # All admissible variables are already present.  The caller will
+            # handle the resulting fixed feasible point without asking HiGHS
+            # to solve a zero-dimensional QP.
+            return active_set
+
+        q_gradient_without_duals = (
+            linear_cost + hessian @ lp_solution
+        )
+        entering_index = int(
+            candidates[
+                np.argmin(q_gradient_without_duals[candidates])
+            ]
+        )
+        active_set[entering_index] = True
 
 
 def _solve_reduced_highs_qp(
     hessian: sparse.csr_matrix,
     linear_cost: npt.NDArray[np.float64],
     constraint_matrix: npt.NDArray[np.float64],
-    rhs: npt.NDArray[np.float64],
+    row_lower: npt.NDArray[np.float64],
+    row_upper: npt.NDArray[np.float64],
     lower: npt.NDArray[np.float64],
     upper: npt.NDArray[np.float64],
     active_indices: npt.NDArray[np.int_],
@@ -148,7 +270,7 @@ def _solve_reduced_highs_qp(
 
     dimension = linear_cost.size
     reduced_dimension = active_indices.size
-    number_of_constraints = rhs.size
+    number_of_constraints = row_lower.size
 
     hessian_reduced = hessian[active_indices, :][:, active_indices].tocsr()
     cost_reduced = linear_cost[active_indices]
@@ -175,8 +297,8 @@ def _solve_reduced_highs_qp(
         model.hessian_.index_ = hessian_reduced.indices.tolist()
         model.hessian_.value_ = hessian_reduced.data.tolist()
 
-    model.lp_.row_lower_ = rhs.tolist()
-    model.lp_.row_upper_ = rhs.tolist()
+    model.lp_.row_lower_ = row_lower.tolist()
+    model.lp_.row_upper_ = row_upper.tolist()
     model.lp_.a_matrix_.format_ = highspy.MatrixFormat.kRowwise
     model.lp_.a_matrix_.start_ = matrix_reduced.indptr.tolist()
     model.lp_.a_matrix_.index_ = matrix_reduced.indices.tolist()
@@ -218,12 +340,19 @@ def _solve_reduced_highs_qp(
         )
         highs.writeSolution("", 1)
 
-    if run_status == highspy.HighsStatus.kError:
-        raise RuntimeError(f"HiGHS failed with status {model_status}.")
-    if model_status != highspy.HighsModelStatus.kOptimal:
-        raise RuntimeError(
-            "HiGHS did not achieve optimality; "
-            f"model status is {model_status}."
+    if (
+        run_status == highspy.HighsStatus.kError
+        or model_status != highspy.HighsModelStatus.kOptimal
+    ):
+        status_text = highs.modelStatusToString(model_status)
+        raise _HighsSubproblemError(
+            "HiGHS did not solve the reduced "
+            f"{'QP' if use_quadratic else 'LP'} to optimality: "
+            f"{status_text} ({model_status}). "
+            f"Reduced dimension={reduced_dimension}, "
+            f"rows={number_of_constraints}, "
+            f"active indices={active_indices.tolist()}.",
+            model_status=model_status,
         )
 
     highs_solution = highs.getSolution()
@@ -238,6 +367,19 @@ def _solve_reduced_highs_qp(
     objective_value = float(highs.getInfo().objective_function_value)
     row_dual = np.asarray(highs_solution.row_dual, dtype=np.float64)
 
+    if (
+        not np.all(np.isfinite(reduced_solution))
+        or not np.isfinite(objective_value)
+        or not np.all(np.isfinite(row_dual))
+    ):
+        raise _HighsSubproblemError(
+            "HiGHS returned non-finite values for the reduced "
+            f"{'QP' if use_quadratic else 'LP'}. "
+            f"Reduced dimension={reduced_dimension}, "
+            f"rows={number_of_constraints}.",
+            model_status=model_status,
+        )
+
     return (
         full_solution,
         objective_value,
@@ -250,17 +392,20 @@ def highs_active_set_qp(
     hessian: npt.NDArray[np.float64] | sparse.spmatrix,
     linear_cost: npt.NDArray[np.float64],
     constraint_matrix: npt.NDArray[np.float64],
-    rhs: npt.NDArray[np.float64],
+    rhs: npt.NDArray[np.float64] | None = None,
     lower_bound: Bound = 0.0,
     upper_bound: Bound = highspy.kHighsInf,
+    row_lower: npt.NDArray[np.float64] | None = None,
+    row_upper: npt.NDArray[np.float64] | None = None,
     time_limit: float | None = None,
     model_output: str = "",
     debug: bool = False,
     max_iterations: int = 1000,
     reduced_cost_tol: float = 1e-8,
-    active_tol: float = 1e-10
+    active_tol: float = 1e-10,
+    full_qp_fallback: bool = True
 ) -> tuple[npt.NDArray[np.float64], float]:
-    """Solve a convex equality-constrained QP using a reduced active set.
+    """Solve a convex linearly constrained QP using a reduced active set.
 
     The mathematical problem is
 
@@ -268,13 +413,20 @@ def highs_active_set_qp(
 
     subject to
 
-    ``constraint_matrix @ x = rhs`` and
+    ``row_lower <= constraint_matrix @ x <= row_upper`` and
     ``lower_bound <= x <= upper_bound``.
 
-    The routine contains no sire/dam-specific logic.  For robust OCS SQP,
-    supply ``x = [w, z]``.  Adding a new SQP constraint means appending a row
-    to ``constraint_matrix`` and the corresponding value to ``rhs`` before
-    calling this method again.
+    For equality-only problems, pass ``rhs`` and omit ``row_lower`` and
+    ``row_upper``.  This is equivalent to setting both row bounds equal to
+    ``rhs`` and preserves the original interface used by standard OCS.
+
+    For robust OCS SQP, use ``x = [w, z]``.  The sire/dam contribution rows
+    have identical row bounds of 0.5, while each tangent plane has lower bound
+    zero and upper bound positive infinity.
+
+    If a highly degenerate reduced QP is reported as unbounded or otherwise
+    fails numerically, ``full_qp_fallback=True`` retries the identical bounded
+    convex QP with all variables before reporting failure.
 
     Returns
     -------
@@ -296,14 +448,36 @@ def highs_active_set_qp(
         constraint_matrix,
         dtype=np.float64
     )
-    rhs_array = np.asarray(rhs, dtype=np.float64)
 
     if linear_cost_array.ndim != 1:
         raise ValueError("linear_cost must be one-dimensional.")
-    if rhs_array.ndim != 1:
-        raise ValueError("rhs must be one-dimensional.")
     if constraint_matrix_array.ndim != 2:
         raise ValueError("constraint_matrix must be two-dimensional.")
+
+    # Backwards-compatible equality interface: Mx = rhs.
+    if rhs is not None:
+        if row_lower is not None or row_upper is not None:
+            raise ValueError(
+                "Pass either rhs for equalities or row_lower/row_upper for "
+                "general rows, not both."
+            )
+        rhs_array = np.asarray(rhs, dtype=np.float64)
+        if rhs_array.ndim != 1:
+            raise ValueError("rhs must be one-dimensional.")
+        row_lower_array = rhs_array.copy()
+        row_upper_array = rhs_array.copy()
+    else:
+        if row_lower is None or row_upper is None:
+            raise ValueError(
+                "When rhs is omitted, both row_lower and row_upper are "
+                "required."
+            )
+        row_lower_array = np.asarray(row_lower, dtype=np.float64)
+        row_upper_array = np.asarray(row_upper, dtype=np.float64)
+        if row_lower_array.ndim != 1 or row_upper_array.ndim != 1:
+            raise ValueError(
+                "row_lower and row_upper must be one-dimensional."
+            )
 
     dimension = linear_cost_array.size
     lower = _bound_array(dimension, lower_bound)
@@ -313,29 +487,32 @@ def highs_active_set_qp(
         hessian=hessian_csr,
         linear_cost=linear_cost_array,
         constraint_matrix=constraint_matrix_array,
-        rhs=rhs_array,
+        row_lower=row_lower_array,
+        row_upper=row_upper_array,
         lower=lower,
         upper=upper
     )
 
-    # The current reduced-column strategy removes inactive variables by fixing
-    # them at zero.  Therefore zero must be a valid lower-bound value for every
-    # variable that may be inactive, including the SQP z variable.
+    # Inactive variables are removed from the reduced model and therefore
+    # implicitly fixed at zero.  Zero must consequently be an admissible lower
+    # bound for every variable that may be inactive, including z.
     if np.any(np.abs(lower) > active_tol):
         raise ValueError(
-            "The reduced active-set QP currently requires every lower bound "
-            "to be zero."
+            "The reduced active-set QP currently requires every variable "
+            "lower bound to be zero."
         )
 
     start_time = time() if time_limit is not None else None
     all_indices = np.arange(dimension, dtype=int)
 
-    # Step 0: solve the linear relaxation over all x = [w, z] variables.
+    # Step 0: solve the LP relaxation over all variables.  The positive
+    # components form the initial reduced variable set.
     lp_solution, lp_objective, _, _ = _solve_reduced_highs_qp(
         hessian=hessian_csr,
         linear_cost=linear_cost_array,
         constraint_matrix=constraint_matrix_array,
-        rhs=rhs_array,
+        row_lower=row_lower_array,
+        row_upper=row_upper_array,
         lower=lower,
         upper=upper,
         active_indices=all_indices,
@@ -348,22 +525,48 @@ def highs_active_set_qp(
 
     active_set = lp_solution > active_tol
 
-    # If the linear relaxation is optimised at x = 0, a positive-semidefinite
-    # quadratic term cannot improve the objective away from zero.
     if not np.any(active_set):
         return lp_solution, lp_objective
 
+    # Avoid asking the HiGHS QP active-set solver to solve a reduced problem
+    # whose tight constraints fix every active variable.  The paper's
+    # three-candidate example produces exactly this corner case after the LP:
+    # one positive sire and one positive dam with two independent equalities.
+    active_set = _enlarge_degenerate_initial_set(
+        active_set=active_set,
+        lp_solution=lp_solution,
+        hessian=hessian_csr,
+        linear_cost=linear_cost_array,
+        constraint_matrix=constraint_matrix_array,
+        row_lower=row_lower_array,
+        row_upper=row_upper_array,
+        upper=upper,
+        active_tol=active_tol,
+    )
+
     hessian_for_gradient = _symmetric_matrix_for_matvec(hessian_csr)
+
+    # Always solve the QP after LP initialisation.  Even when the LP point is
+    # a vertex and all variables are present, inequalities that are tight at
+    # the LP solution are allowed to become inactive in the QP.  Therefore the
+    # LP point must never be returned merely because the currently tight rows
+    # have full rank.
 
     for iteration in range(max_iterations):
         active_indices = np.flatnonzero(active_set)
 
-        solution, objective_value, row_dual, reduced_hessian_shape = (
-            _solve_reduced_highs_qp(
+        try:
+            (
+                solution,
+                objective_value,
+                row_dual,
+                reduced_hessian_shape,
+            ) = _solve_reduced_highs_qp(
                 hessian=hessian_csr,
                 linear_cost=linear_cost_array,
                 constraint_matrix=constraint_matrix_array,
-                rhs=rhs_array,
+                row_lower=row_lower_array,
+                row_upper=row_upper_array,
                 lower=lower,
                 upper=upper,
                 active_indices=active_indices,
@@ -371,12 +574,59 @@ def highs_active_set_qp(
                 time_limit=_remaining_time(time_limit, start_time),
                 model_output=model_output,
                 debug=debug,
-                iteration=iteration
+                iteration=iteration,
             )
-        )
+        except _HighsSubproblemError as reduced_error:
+            # A heavily constrained reduced model can be numerically
+            # degenerate even though the original bounded convex QP is well
+            # posed.  In that case solve the same QP once with every variable.
+            # This remains part of this QP solver; it is only a robust fallback
+            # from the reduced formulation to the full formulation.
+            if not full_qp_fallback or active_indices.size == dimension:
+                raise
+
+            if debug:
+                print(
+                    "Reduced QP was not solved reliably "
+                    f"({reduced_error.model_status}). "
+                    "Retrying the same subproblem with all variables."
+                )
+
+            try:
+                (
+                    full_solution,
+                    full_objective,
+                    _,
+                    _,
+                ) = _solve_reduced_highs_qp(
+                    hessian=hessian_csr,
+                    linear_cost=linear_cost_array,
+                    constraint_matrix=constraint_matrix_array,
+                    row_lower=row_lower_array,
+                    row_upper=row_upper_array,
+                    lower=lower,
+                    upper=upper,
+                    active_indices=all_indices,
+                    use_quadratic=True,
+                    time_limit=_remaining_time(time_limit, start_time),
+                    model_output=model_output,
+                    debug=debug,
+                    iteration=iteration,
+                )
+            except _HighsSubproblemError as full_error:
+                raise RuntimeError(
+                    "Both the reduced QP and the full-dimensional fallback "
+                    "failed. Reduced status: "
+                    f"{reduced_error.model_status}; full status: "
+                    f"{full_error.model_status}."
+                ) from full_error
+
+            return full_solution, full_objective
 
         # HiGHS minimisation reduced cost at a zero lower bound:
         #     r = c + Qx - M^T y.
+        # The same stationarity expression applies to equality and inequality
+        # rows; HiGHS supplies the corresponding signed row duals.
         reduced_cost = (
             linear_cost_array
             + hessian_for_gradient @ solution
@@ -420,3 +670,4 @@ def highs_active_set_qp(
         "General active-set QP solver did not converge after "
         f"{max_iterations} iterations."
     )
+
