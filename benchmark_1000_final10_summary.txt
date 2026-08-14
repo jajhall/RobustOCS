@@ -1,0 +1,66 @@
+==============================================================================================
+FINAL 1000-CANDIDATE BENCHMARK SUMMARY
+==============================================================================================
+Python = 3.11.4
+HiGHS = 1.14.0
+Platform = Windows-10-10.0.26200-SP0
+Mapping = S1000 -> Sigma, A1000 -> Omega
+Candidates = 1000
+Full QP dimension = 1001
+lambda = 0.5
+kappa = 1.0
+robust-gap tolerance = 1.0e-06
+reduced-cost tolerance = 1.0e-08
+active tolerance = 1.0e-10
+timed repeats = 10
+Warm-up = one unreported pair
+
+Convergence
+  reduced-space = 10/10
+  full-space    = 10/10
+  valid paired comparisons = 10
+
+Reduced-space runtime (s)
+  mean   = 12.112048
+  median = 11.969164
+  stdev  = 0.300853
+  min    = 11.797608
+  max    = 12.655067
+
+Full-space runtime (s)
+  mean   = 64.255266
+  median = 64.449509
+  stdev  = 0.936161
+  min    = 62.775660
+  max    = 65.325838
+
+Speed-up = full-space runtime / reduced-space runtime
+  mean   = 5.307117x
+  median = 5.287361x
+  stdev  = 0.114201
+  min    = 5.162030x
+  max    = 5.485985x
+
+SQP subproblems
+  reduced-space mean = 99.000
+  full-space mean    = 102.000
+
+Reduced-space QP dimensions
+  full QP dimension = 1001
+  mean QP dimension = 37.021
+  median QP dimension = 45.000
+  mean fraction of full dimension = 0.036984
+  mean dimension reduction = 96.302%
+  mean full-dimension fallback attempts = 1.000
+  mean failed QP attempts = 1.000
+
+Solution agreement across valid paired runs
+  maximum max|w_reduced - w_full| = 2.370853757363e-04
+  maximum objective absolute difference = 2.538103565097e-07
+  maximum |z_reduced - z_full| = 3.076806485297e-05
+
+Reporting rule
+  Runtime speed-up is interpreted only for paired runs in which
+  both methods converged. The warm-up pair is excluded from all
+  reported timing statistics.
+==============================================================================================

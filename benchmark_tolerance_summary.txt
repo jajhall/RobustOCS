@@ -1,0 +1,80 @@
+========================================================================================
+ROBUST OCS TOLERANCE-SENSITIVITY SUMMARY
+========================================================================================
+Python = 3.11.4
+HiGHS  = 1.14.0
+Problem = 50 candidates (51 QP variables including z)
+Mapping = S50 -> Sigma, A50 -> Omega
+lambda = 0.5
+kappa = 1.0
+reduced_cost_tol = 1e-08
+active_tol = 1e-10
+repeats per tolerance = 10
+
+Tolerance 1.0e-05
+  reduced-space convergence = 10/10
+  full-space convergence    = 10/10
+  reduced mean runtime (s)  = 0.652931110
+  full mean runtime (s)     = 0.352547060
+  valid paired comparisons  = 10
+  mean speed-up full/reduced = 0.540215
+  median speed-up            = 0.534553
+  max solution difference   = 1.909e-04
+  max objective difference  = 1.090e-07
+  mean reduced SQP solves   = 62.000
+  mean full SQP solves      = 62.000
+  mean full failure iter.   = N/A
+
+Tolerance 1.0e-06
+  reduced-space convergence = 10/10
+  full-space convergence    = 10/10
+  reduced mean runtime (s)  = 0.895796670
+  full mean runtime (s)     = 0.523338430
+  valid paired comparisons  = 10
+  mean speed-up full/reduced = 0.584444
+  median speed-up            = 0.585609
+  max solution difference   = 2.430e-04
+  max objective difference  = 1.938e-07
+  mean reduced SQP solves   = 76.000
+  mean full SQP solves      = 79.000
+  mean full failure iter.   = N/A
+
+Tolerance 5.0e-07
+  reduced-space convergence = 10/10
+  full-space convergence    = 10/10
+  reduced mean runtime (s)  = 0.929748810
+  full mean runtime (s)     = 0.570218540
+  valid paired comparisons  = 10
+  mean speed-up full/reduced = 0.613532
+  median speed-up            = 0.616118
+  max solution difference   = 1.786e-04
+  max objective difference  = 1.713e-08
+  mean reduced SQP solves   = 78.000
+  mean full SQP solves      = 83.000
+  mean full failure iter.   = N/A
+
+Tolerance 1.0e-07
+  reduced-space convergence = 10/10
+  full-space convergence    = 0/10
+  reduced mean runtime (s)  = 1.148766180
+  full mean runtime (s)     = N/A
+  valid paired comparisons  = 0
+  mean speed-up full/reduced = N/A
+  median speed-up            = N/A
+  max solution difference   = N/A
+  max objective difference  = N/A
+  mean reduced SQP solves   = 89.000
+  mean full SQP solves      = N/A
+  mean full failure iter.   = 83.000
+
+Interpretation rules
+  1. Runtime speed-up is computed only when both methods converge.
+  2. A tolerance sweep is a sensitivity analysis, not a replacement for
+     the strict 1e-7 experiment.
+  3. If the two methods converge to materially different solutions at a
+     given tolerance, the timing comparison must be interpreted with
+     caution and the solution differences should be reported.
+
+Detailed results: benchmark_tolerance_results.csv
+Summary CSV:      benchmark_tolerance_summary.csv
+========================================================================================

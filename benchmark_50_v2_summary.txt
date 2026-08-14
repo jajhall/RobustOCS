@@ -1,0 +1,101 @@
+================================================================================
+BENCHMARK 50 V2 SUMMARY
+================================================================================
+
+Experiment environment
+  Python = 3.11.4
+  HiGHS  = 1.14.0
+  OS     = Windows-10-10.0.26200-SP0
+  Machine= AMD64
+  Processor = AMD64 Family 25 Model 80 Stepping 0, AuthenticAMD
+
+Problem settings
+  candidates = 50
+  complete QP dimension = 51 (50 w variables + z)
+  mapping = S50 -> Sigma, A50 -> Omega
+  lambda = 0.5
+  kappa = 1.0
+  robust_gap_tol = 1e-07
+  reduced_cost_tol = 1e-08
+  active_tol = 1e-10
+  timed repeats = 10
+
+Convergence counts
+  reduced-space successes = 10/10
+  reduced-space failures  = 0/10
+  full-space successes    = 0/10
+  full-space failures     = 10/10
+
+Reduced-space runtime for converged runs (s):
+  n      = 10
+  mean   = 1.184022640
+  median = 1.152100600
+  stdev  = 0.059882972
+  min    = 1.128651700
+  max    = 1.280316900
+
+Full-space runtime for converged runs (s):
+  no applicable observations
+
+Full-space time to failure (s):
+  n      = 10
+  mean   = 0.599706100
+  median = 0.584486650
+  stdev  = 0.031018081
+  min    = 0.573232400
+  max    = 0.656314400
+
+Valid paired speed-up = full / reduced:
+  no applicable observations
+
+Full-space failed SQP iteration:
+  n      = 10
+  mean   = 83.000000000
+  median = 83.000000000
+  stdev  = 0.000000000
+  min    = 83.000000000
+  max    = 83.000000000
+
+Full-space rows at failure:
+  n      = 10
+  mean   = 85.000000000
+  median = 85.000000000
+  stdev  = 0.000000000
+  min    = 85.000000000
+  max    = 85.000000000
+
+Absolute robust gap at last successful full-space iteration:
+  n      = 10
+  mean   = 0.000000342
+  median = 0.000000342
+  stdev  = 0.000000000
+  min    = 0.000000342
+  max    = 0.000000342
+
+Reduced-space QP dimensions actually passed to HiGHS:
+  n      = 1900
+  mean   = 15.284210526
+  median = 14.000000000
+  stdev  = 5.233189255
+  min    = 3.000000000
+  max    = 51.000000000
+  full-dimension QP attempts inside reduced-space method = 20
+
+Full-space QP dimensions actually passed to HiGHS:
+  n      = 840
+  mean   = 51.000000000
+  median = 51.000000000
+  stdev  = 0.000000000
+  min    = 51.000000000
+  max    = 51.000000000
+
+Important interpretation rule
+  A speed-up is reported only when BOTH methods converge in the same repeat.
+  If full-space fails, its runtime is time-to-failure, NOT a valid competing
+  solution time, so no speed-up should be inferred from that pair.
+
+Files
+  detailed run results = benchmark_50_v2_results.csv
+  per-SQP-iteration results = benchmark_50_v2_iterations.csv
+  individual LP/QP attempts = benchmark_50_v2_qp_attempts.csv
+================================================================================
