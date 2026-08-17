@@ -2,8 +2,8 @@
 """Validate the new reduced-space active-set SQP on the 1000-candidate case.
 
 Dissertation mapping used here:
-    S1000.txt -> Sigma
-    A1000.txt -> Omega
+    A1000.txt -> Sigma
+    S1000.txt -> Omega
 
 Run from the RobustOCS repository root:
     python validate_1000_reduced_sqp.py --tol 1e-6
@@ -89,9 +89,9 @@ def load_1000():
             "Run this script from the RobustOCS repository root. Missing:\n" + "\n".join(missing)
         )
     return rocs.load_problem(
-        sigma_filename=str(d / "S1000.txt"),
+        sigma_filename=str(d / "A1000.txt"),
         mu_filename=str(d / "EBV1000.txt"),
-        omega_filename=str(d / "A1000.txt"),
+        omega_filename=str(d / "S1000.txt"),
         sex_filename=str(d / "SEX1000.txt"),
         issparse=True,
     )
@@ -109,7 +109,7 @@ def main():
 
     print("=" * 82)
     print("1000-CANDIDATE REDUCED-SPACE ACTIVE-SET SQP VALIDATION")
-    print("Mapping: S1000 -> Sigma, A1000 -> Omega")
+    print("Mapping: A1000 -> Sigma, S1000 -> Omega")
     print(f"robust-gap tolerance = {args.tol:.1e}")
     print("=" * 82)
 

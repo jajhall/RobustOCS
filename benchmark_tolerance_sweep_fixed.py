@@ -175,7 +175,7 @@ def main():
     print("=" * 88)
     print("Robust OCS tolerance-sensitivity benchmark")
     print("Reduced-space HiGHS SQP vs full-space HiGHS SQP")
-    print("50 candidates; mapping: S50 -> Sigma, A50 -> Omega")
+    print("50 candidates; mapping: A50 -> Sigma, S50 -> Omega")
     print("=" * 88)
     print("Tolerances:", ", ".join(f"{tol:.1e}" for tol in TOLERANCES))
     print(f"Timed repeats per tolerance: {N_REPEATS}")
@@ -379,7 +379,7 @@ def main():
         f"Python = {base.sys.version.split()[0]}",
         f"HiGHS  = {base.highs_version()}",
         "Problem = 50 candidates (51 QP variables including z)",
-        "Mapping = S50 -> Sigma, A50 -> Omega",
+        "Mapping = A50 -> Sigma, S50 -> Omega",
         f"lambda = {base.LAM}",
         f"kappa = {base.KAPPA}",
         f"reduced_cost_tol = {base.REDUCED_COST_TOL}",

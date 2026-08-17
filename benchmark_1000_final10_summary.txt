@@ -4,7 +4,7 @@ FINAL 1000-CANDIDATE BENCHMARK SUMMARY
 Python = 3.11.4
 HiGHS = 1.14.0
 Platform = Windows-10-10.0.26200-SP0
-Mapping = S1000 -> Sigma, A1000 -> Omega
+Mapping = A1000 -> Sigma, S1000 -> Omega
 Candidates = 1000
 Full QP dimension = 1001
 lambda = 0.5
@@ -17,47 +17,47 @@ Warm-up = one unreported pair
 
 Convergence
   reduced-space = 10/10
-  full-space    = 10/10
-  valid paired comparisons = 10
+  full-space    = 0/10
+  valid paired comparisons = 0
 
 Reduced-space runtime (s)
-  mean   = 12.112048
-  median = 11.969164
-  stdev  = 0.300853
-  min    = 11.797608
-  max    = 12.655067
+  mean   = 1.846744
+  median = 1.835313
+  stdev  = 0.071489
+  min    = 1.764461
+  max    = 2.026043
 
 Full-space runtime (s)
-  mean   = 64.255266
-  median = 64.449509
-  stdev  = 0.936161
-  min    = 62.775660
-  max    = 65.325838
+  mean   = N/A
+  median = N/A
+  stdev  = N/A
+  min    = N/A
+  max    = N/A
 
 Speed-up = full-space runtime / reduced-space runtime
-  mean   = 5.307117x
-  median = 5.287361x
-  stdev  = 0.114201
-  min    = 5.162030x
-  max    = 5.485985x
+  mean   = N/Ax
+  median = N/Ax
+  stdev  = N/A
+  min    = N/Ax
+  max    = N/Ax
 
 SQP subproblems
-  reduced-space mean = 99.000
-  full-space mean    = 102.000
+  reduced-space mean = 21.000
+  full-space mean    = N/A
 
 Reduced-space QP dimensions
   full QP dimension = 1001
-  mean QP dimension = 37.021
-  median QP dimension = 45.000
-  mean fraction of full dimension = 0.036984
-  mean dimension reduction = 96.302%
-  mean full-dimension fallback attempts = 1.000
-  mean failed QP attempts = 1.000
+  mean QP dimension = 53.786
+  median QP dimension = 42.500
+  mean fraction of full dimension = 0.053732
+  mean dimension reduction = 94.627%
+  mean full-dimension fallback attempts = 0.000
+  mean failed QP attempts = 0.000
 
 Solution agreement across valid paired runs
-  maximum max|w_reduced - w_full| = 2.370853757363e-04
-  maximum objective absolute difference = 2.538103565097e-07
-  maximum |z_reduced - z_full| = 3.076806485297e-05
+  maximum solution difference = N/A
+  maximum objective difference = N/A
+  maximum z difference = N/A
 
 Reporting rule
   Runtime speed-up is interpreted only for paired runs in which

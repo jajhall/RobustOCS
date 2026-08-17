@@ -8,8 +8,8 @@ Compares:
     2. direct full-space HiGHS SQP
 
 Problem definition used in the dissertation:
-    S1000.txt -> Sigma
-    A1000.txt -> Omega
+    A1000.txt -> Sigma
+    S1000.txt -> Omega
     lambda = 0.5
     kappa = 1.0
     robust-gap tolerance = 1e-6
@@ -74,11 +74,11 @@ def load_1000_problem():
         )
 
     # Dissertation mapping:
-    # S1000 -> Sigma, A1000 -> Omega
+    # A1000 -> Sigma, S1000 -> Omega
     return rocs.load_problem(
-        sigma_filename=str(data_dir / "S1000.txt"),
+        sigma_filename=str(data_dir / "A1000.txt"),
         mu_filename=str(data_dir / "EBV1000.txt"),
-        omega_filename=str(data_dir / "A1000.txt"),
+        omega_filename=str(data_dir / "S1000.txt"),
         sex_filename=str(data_dir / "SEX1000.txt"),
         issparse=True,
     )
@@ -258,7 +258,7 @@ def main():
     print("FINAL 1000-CANDIDATE BENCHMARK")
     print("Reduced-space active-set HiGHS SQP vs direct full-space HiGHS SQP")
     print("=" * 94)
-    print("Mapping: S1000 -> Sigma, A1000 -> Omega")
+    print("Mapping: A1000 -> Sigma, S1000 -> Omega")
     print(f"lambda = {LAM}")
     print(f"kappa = {KAPPA}")
     print(f"robust-gap tolerance = {ROBUST_GAP_TOL:.1e}")
@@ -485,7 +485,7 @@ def main():
         f"Python = {sys.version.split()[0]}",
         f"HiGHS = {highs_ver}",
         f"Platform = {platform.platform()}",
-        "Mapping = S1000 -> Sigma, A1000 -> Omega",
+        "Mapping = A1000 -> Sigma, S1000 -> Omega",
         f"Candidates = 1000",
         f"Full QP dimension = {FULL_QP_DIMENSION}",
         f"lambda = {LAM}",

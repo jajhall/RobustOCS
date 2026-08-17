@@ -671,9 +671,9 @@ def load_50_problem():
         )
 
     return rocs.load_problem(
-        sigma_filename=str(data_dir / "S50.txt"),
+        sigma_filename=str(data_dir / "A50.txt"),
         mu_filename=str(data_dir / "EBV50.txt"),
-        omega_filename=str(data_dir / "A50.txt"),
+        omega_filename=str(data_dir / "S50.txt"),
         sex_filename=str(data_dir / "SEX50.txt"),
         issparse=True,
     )
@@ -728,7 +728,7 @@ def main():
     print("=" * 80)
     print("Robust OCS benchmark v2: 50 candidates")
     print("Reduced-space HiGHS SQP vs full-space HiGHS SQP")
-    print("Mapping: S50 -> Sigma, A50 -> Omega")
+    print("Mapping: A50 -> Sigma, S50 -> Omega")
     print("=" * 80)
 
     all_results = []
@@ -1058,7 +1058,7 @@ def main():
         "Problem settings",
         "  candidates = 50",
         "  complete QP dimension = 51 (50 w variables + z)",
-        "  mapping = S50 -> Sigma, A50 -> Omega",
+        "  mapping = A50 -> Sigma, S50 -> Omega",
         f"  lambda = {LAM}",
         f"  kappa = {KAPPA}",
         f"  robust_gap_tol = {ROBUST_GAP_TOL}",

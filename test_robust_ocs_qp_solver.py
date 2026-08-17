@@ -5,8 +5,8 @@ This script performs two checks:
 
 1. The three-candidate example in the Robust OCS paper.
 2. The real 50-candidate data, using the requested mapping:
-       S50.txt   -> sigma
-       A50.txt   -> omega
+       A50.txt   -> sigma
+       S50.txt   -> omega
        EBV50.txt -> mubar
        SEX50.txt -> sire/dam sets
 
@@ -173,12 +173,12 @@ def test_real_50() -> None:
         )
 
     # Mapping specified by the supervisor:
-    # S50 is Sigma and A50 is Omega.
+    # A50 is Sigma and S50 is Omega.
     sigma, mubar, omega, dimension, sires, dams, names = (
         rocs.load_problem(
-            sigma_filename=str(data_dir / "S50.txt"),
+            sigma_filename=str(data_dir / "A50.txt"),
             mu_filename=str(data_dir / "EBV50.txt"),
-            omega_filename=str(data_dir / "A50.txt"),
+            omega_filename=str(data_dir / "S50.txt"),
             sex_filename=str(data_dir / "SEX50.txt"),
             issparse=True,
         )
@@ -189,7 +189,7 @@ def test_real_50() -> None:
 
     print("=" * 80)
     print("Real 50-dimensional Robust OCS")
-    print("Mapping: S50 -> Sigma, A50 -> Omega")
+    print("Mapping: A50 -> Sigma, S50 -> Omega")
     print("=" * 80)
 
     w, z, objective = highs_robust_genetics_sqp(
